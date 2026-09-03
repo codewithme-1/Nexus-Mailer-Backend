@@ -60,7 +60,7 @@ def send_brevo_email_sync(email_address: str, subject: str, html_content: str):
     )
 
 async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: str, queue_records: list):
-    """Hybrid Execution: Standard pacing for Brevo, 4x Accelerated pacing for Internal Engine."""
+    """Hybrid Execution: Accelerated Brevo pacing, Warp Speed for Internal Engine."""
     print(f"[SYSTEM] Dispatching {len(queue_records)} emails for Campaign: {campaign_id}")
     
     today_str = datetime.utcnow().date().isoformat()
@@ -85,12 +85,10 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
             print("[SYSTEM] 10,000 daily email limit reached. Halting dispatch for today.")
             break
 
-        # --- DYNAMIC DEMO THROTTLE ---
-        # If Brevo is active, pace normally (7 per 60s). 
-        # If Internal Engine takes over, go 4x faster (28 per 15s).
+        # --- DYNAMIC DEMO THROTTLE (NITRO SPEED) ---
         is_mock_engine = brevo_exhausted or brevo_sent_today >= 300
-        batch_size = 28 if is_mock_engine else 7
-        pause_duration = 15 if is_mock_engine else 60
+        batch_size = 50 if is_mock_engine else 20
+        pause_duration = 5 if is_mock_engine else 10
 
         # 2. Universal Rate Limiter
         if i > 0 and i % batch_size == 0:
@@ -130,7 +128,7 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
         
         if provider_used == "Sent":
             # Internal Engine Simulation
-            await asyncio.sleep(0.05)  # Faster micro-delay for the accelerated speed
+            await asyncio.sleep(0.01)  # Lightning fast micro-delay
             if random.random() < 0.02:  # Realistic 2% bounce simulation
                 final_status = "bounced"
             else:
@@ -158,6 +156,36 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
     # Mark the campaign as finished
     supabase.table("campaigns").update({"status": "completed"}).eq("id", campaign_id).execute()
     print(f"[SYSTEM] Campaign {campaign_id} dispatch completed.")
+
+
+# --- CRASH RECOVERY SYSTEM (AUTO-HEAL) ---
+@app.on_event("startup")
+async def auto_resume_campaigns():
+    """If the server restarts or wakes from hibernation, automatically find and resume stuck emails."""
+    print("[SYSTEM] Booting up. Scanning for stalled campaigns...")
+    try:
+        camp_res = supabase.table("campaigns").select("*").eq("status", "running").execute()
+        for camp in camp_res.data:
+            pending_records = []
+            start = 0
+            page_size = 1000
+            
+            # Use pagination to bypass the 1000 limit and fetch ALL stuck emails
+            while True:
+                res = supabase.table("email_queue").select("*").eq("campaign_id", camp["id"]).eq("status", "pending").range(start, start + page_size - 1).execute()
+                if not res.data:
+                    break
+                pending_records.extend(res.data)
+                if len(res.data) < page_size:
+                    break
+                start += page_size
+            
+            if pending_records:
+                print(f"[SYSTEM] Auto-Heal Triggered: Resuming {len(pending_records)} stalled emails for Campaign {camp['id']}")
+                asyncio.create_task(run_campaign_dispatch(camp["id"], camp["subject"], camp["body_html"], pending_records))
+    except Exception as e:
+        print(f"[SYSTEM] Auto-recovery error: {e}")
+
 
 # --- API Endpoints ---
 @app.post("/api/audiences/upload")
@@ -245,8 +273,8 @@ async def queue_campaign(payload: CampaignPayload, background_tasks: BackgroundT
         # Grab the exact database records returned by Supabase so we don't have to re-query them
         inserted_records.extend(res.data)
 
-    # 3. TRIGGER INSTANT EXECUTION using the in-memory records
-    background_tasks.add_task(run_campaign_dispatch, campaign_id, payload.subject, payload.body_html, inserted_records)
+    # 3. TRIGGER INSTANT EXECUTION (using asyncio to detach from the request)
+    asyncio.create_task(run_campaign_dispatch(campaign_id, payload.subject, payload.body_html, inserted_records))
     
     return {"status": "success", "queued": len(queue_data), "campaign_id": campaign_id}
 
