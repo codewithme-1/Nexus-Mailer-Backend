@@ -60,7 +60,7 @@ def send_brevo_email_sync(email_address: str, subject: str, html_content: str):
     )
 
 async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: str, queue_records: list):
-    """Hybrid Execution: Standard 24h Pacing with seamless Brevo to Internal Engine transition."""
+    """Hybrid Execution: Standard pacing for Brevo, 4x Accelerated pacing for Internal Engine."""
     print(f"[SYSTEM] Dispatching {len(queue_records)} emails for Campaign: {campaign_id}")
     
     today_str = datetime.utcnow().date().isoformat()
@@ -85,17 +85,24 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
             print("[SYSTEM] 10,000 daily email limit reached. Halting dispatch for today.")
             break
 
-        # 2. Universal 7-Email Rate Limiter (24-Hour Pacing)
-        if i > 0 and i % 7 == 0:
+        # --- DYNAMIC DEMO THROTTLE ---
+        # If Brevo is active, pace normally (7 per 60s). 
+        # If Internal Engine takes over, go 4x faster (28 per 15s).
+        is_mock_engine = brevo_exhausted or brevo_sent_today >= 300
+        batch_size = 28 if is_mock_engine else 7
+        pause_duration = 15 if is_mock_engine else 60
+
+        # 2. Universal Rate Limiter
+        if i > 0 and i % batch_size == 0:
             throttle_event = {
                 "email": "SYSTEM THROTTLE ACTIVE",
-                "status": "PAUSED (60s)",
+                "status": f"PAUSED ({pause_duration}s)",
                 "provider": "Pacing_Engine",
                 "time": datetime.now().strftime("%H:%M:%S")
             }
             await broadcast_event(throttle_event)
-            print(f"[PACING ENGINE] Sent 7 emails. Pausing for 60 seconds...")
-            await asyncio.sleep(60)
+            print(f"[PACING ENGINE] Sent {batch_size} emails. Pausing for {pause_duration} seconds...")
+            await asyncio.sleep(pause_duration)
             print(f"[PACING ENGINE] Resuming dispatch.")
 
         # 3. Mark as processing in DB
@@ -123,7 +130,7 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
         
         if provider_used == "Sent":
             # Internal Engine Simulation
-            await asyncio.sleep(0.1)  # Micro-delay for mechanical realism
+            await asyncio.sleep(0.05)  # Faster micro-delay for the accelerated speed
             if random.random() < 0.02:  # Realistic 2% bounce simulation
                 final_status = "bounced"
             else:
