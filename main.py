@@ -199,8 +199,21 @@ async def upload_audience_file(name: str = Form(...), file: UploadFile = File(..
 
 @app.post("/api/campaign/queue")
 async def queue_campaign(payload: CampaignPayload, background_tasks: BackgroundTasks):
-    contacts_res = supabase.table("contacts").select("email").eq("audience_id", payload.audience_id).execute()
-    emails = [row["email"] for row in contacts_res.data]
+    
+    # --- FIXED PAGINATION: Grabs ALL emails in chunks of 1,000 ---
+    emails = []
+    page_size = 1000
+    start = 0
+    
+    while True:
+        contacts_res = supabase.table("contacts").select("email").eq("audience_id", payload.audience_id).range(start, start + page_size - 1).execute()
+        batch = [row["email"] for row in contacts_res.data]
+        if not batch:
+            break
+        emails.extend(batch)
+        if len(batch) < page_size:
+            break
+        start += page_size
 
     if not emails:
         raise HTTPException(status_code=400, detail="Audience is empty or not found.")
