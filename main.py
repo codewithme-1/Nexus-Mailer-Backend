@@ -5,6 +5,7 @@ import json
 import re
 import random
 import requests
+import os
 from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -22,7 +23,7 @@ app.add_middleware(
 )
 
 # --- Integrated User Credentials ---
-BREVO_API_KEY = "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" 
+BREVO_API_KEY = os.getenv("BREVO_API_KEY") 
 SENDER_EMAIL = "admin@miningofficial.co.ke"
 
 # --- SSE Broadcaster ---
