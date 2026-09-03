@@ -246,19 +246,27 @@ async def queue_campaign(payload: CampaignPayload, background_tasks: BackgroundT
 @app.get("/api/dashboard/stats")
 async def get_dashboard_stats():
     try:
-        camp_res = supabase.table("campaigns").select("id").eq("status", "running").execute()
-        queued_res = supabase.table("email_queue").select("id").eq("status", "pending").execute()
+        camp_res = supabase.table("campaigns").select("id", count="exact").eq("status", "running").execute()
+        active_camps = camp_res.count if camp_res.count is not None else 0
+
+        queued_res = supabase.table("email_queue").select("id", count="exact").eq("status", "pending").execute()
+        total_queued = queued_res.count if queued_res.count is not None else 0
+
         today_str = datetime.utcnow().date().isoformat()
-        sent_res = supabase.table("email_queue").select("id").eq("status", "delivered").gte("processed_at", today_str).execute()
-        failed_res = supabase.table("email_queue").select("id").eq("status", "bounced").gte("processed_at", today_str).execute()
         
-        total_processed = len(sent_res.data) + len(failed_res.data)
-        success_rate = 100.0 if total_processed == 0 else round((len(sent_res.data) / total_processed) * 100, 1)
+        sent_res = supabase.table("email_queue").select("id", count="exact").eq("status", "delivered").gte("processed_at", today_str).execute()
+        sent_today = sent_res.count if sent_res.count is not None else 0
+        
+        failed_res = supabase.table("email_queue").select("id", count="exact").eq("status", "bounced").gte("processed_at", today_str).execute()
+        failed_today = failed_res.count if failed_res.count is not None else 0
+        
+        total_processed = sent_today + failed_today
+        success_rate = 100.0 if total_processed == 0 else round((sent_today / total_processed) * 100, 1)
             
         return {
-            "active_campaigns": len(camp_res.data),
-            "total_queued": len(queued_res.data),
-            "sent_today": len(sent_res.data),
+            "active_campaigns": active_camps,
+            "total_queued": total_queued,
+            "sent_today": sent_today,
             "success_rate": success_rate
         }
     except Exception as e:
@@ -270,10 +278,11 @@ async def get_active_campaigns():
         camps = supabase.table("campaigns").select("*").eq("status", "running").order("created_at", desc=True).execute()
         result = []
         for camp in camps.data:
-            pending_res = supabase.table("email_queue").select("id").eq("campaign_id", camp["id"]).eq("status", "pending").execute()
+            pending_res = supabase.table("email_queue").select("id", count="exact").eq("campaign_id", camp["id"]).eq("status", "pending").execute()
+            pending_count = pending_res.count if pending_res.count is not None else 0
             total = camp.get("total_recipients", 0)
             result.append({
-                "id": camp["id"], "subject": camp["subject"], "total": total, "processed": total - len(pending_res.data)
+                "id": camp["id"], "subject": camp["subject"], "total": total, "processed": total - pending_count
             })
         return {"campaigns": result}
     except Exception as e:
