@@ -92,9 +92,9 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
             print("[SYSTEM] 10,000 daily email limit reached. Halting dispatch for today.")
             break
 
-        # --- TIER DETERMINATION ---
-        is_node_1_active = not node_1_exhausted and brevo_sent_today < 300
-        is_node_2_active = not node_2_exhausted and brevo_sent_today >= 300 and brevo_sent_today < 600
+        # --- TIER DETERMINATION (TEMPORARY DEMO OVERRIDE) ---
+        is_node_1_active = False # Bypassed for today's client test
+        is_node_2_active = not node_2_exhausted and brevo_sent_today < 600
         is_mock_engine = not is_node_1_active and not is_node_2_active
 
         # --- DYNAMIC DEMO THROTTLE ---
@@ -147,6 +147,7 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
                 
         if is_node_2_active and not email_dispatched:
             try:
+                await asyncio.sleep(0.5) # Anti-spam stagger to protect the live demo
                 res = await asyncio.to_thread(send_brevo_email_sync, record["email"], subject, html_content, BREVO_API_KEY_2, SENDER_EMAIL_2)
                 if res.status_code in [200, 201]:
                     provider_used = "Brevo-Node-2"
