@@ -23,8 +23,13 @@ app.add_middleware(
 )
 
 # --- Integrated User Credentials ---
-BREVO_API_KEY = os.getenv("BREVO_API_KEY") 
-SENDER_EMAIL = "admin@miningofficial.co.ke"
+# Primary Node
+BREVO_API_KEY_1 = os.getenv("BREVO_API_KEY") 
+SENDER_EMAIL_1 = "admin@miningofficial.co.ke"
+
+# Secondary Node (Failover)
+BREVO_API_KEY_2 = os.getenv("BREVO_API_KEY_2") 
+SENDER_EMAIL_2 = "admin@send.miningofficial.co.ke"
 
 # --- SSE Broadcaster ---
 active_connections = set()
@@ -41,17 +46,17 @@ class CampaignPayload(BaseModel):
     audience_id: str
 
 # --- Immediate Dispatch Logic ---
-def send_brevo_email_sync(email_address: str, subject: str, html_content: str):
-    """Standard, stable HTTP request to Brevo."""
+def send_brevo_email_sync(email_address: str, subject: str, html_content: str, api_key: str, sender_email: str):
+    """Standard, stable HTTP request to Brevo supporting dynamic node routing."""
     return requests.post(
         "https://api.brevo.com/v3/smtp/email",
         headers={
             "accept": "application/json",
-            "api-key": BREVO_API_KEY,
+            "api-key": api_key,
             "content-type": "application/json"
         },
         json={
-            "sender": {"name": "Nexus Platform", "email": SENDER_EMAIL},
+            "sender": {"name": "Nexus Platform", "email": sender_email},
             "to": [{"email": email_address}],
             "subject": subject,
             "htmlContent": html_content
@@ -60,7 +65,7 @@ def send_brevo_email_sync(email_address: str, subject: str, html_content: str):
     )
 
 async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: str, queue_records: list):
-    """Hybrid Execution: Accelerated Brevo pacing, Warp Speed for Internal Engine."""
+    """Hybrid Execution: Multi-Node Cascading Failover with Warp Speed Mocking."""
     print(f"[SYSTEM] Dispatching {len(queue_records)} emails for Campaign: {campaign_id}")
     
     today_str = datetime.utcnow().date().isoformat()
@@ -70,14 +75,16 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
         sent_res = supabase.table("email_queue").select("id", count="exact").eq("status", "delivered").gte("processed_at", today_str).execute()
         total_sent_today = sent_res.count if sent_res.count is not None else len(sent_res.data)
         
-        brevo_res = supabase.table("email_queue").select("id", count="exact").eq("provider_used", "Brevo").gte("processed_at", today_str).execute()
+        # Track volume across all live nodes to determine tier routing
+        brevo_res = supabase.table("email_queue").select("id", count="exact").in_("provider_used", ["Brevo", "Brevo-Node-1", "Brevo-Node-2"]).gte("processed_at", today_str).execute()
         brevo_sent_today = brevo_res.count if brevo_res.count is not None else len(brevo_res.data)
     except Exception as e:
         print(f"[SYSTEM] Warning: Could not fetch exact daily counts: {e}")
         total_sent_today = 0
         brevo_sent_today = 0
 
-    brevo_exhausted = False
+    node_1_exhausted = False
+    node_2_exhausted = False
 
     for i, record in enumerate(queue_records):
         # 1. Daily 10,000 Cap Enforcer
@@ -85,8 +92,12 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
             print("[SYSTEM] 10,000 daily email limit reached. Halting dispatch for today.")
             break
 
-        # --- DYNAMIC DEMO THROTTLE (NITRO SPEED) ---
-        is_mock_engine = brevo_exhausted or brevo_sent_today >= 300
+        # --- TIER DETERMINATION ---
+        is_node_1_active = not node_1_exhausted and brevo_sent_today < 300
+        is_node_2_active = not node_2_exhausted and brevo_sent_today >= 300 and brevo_sent_today < 600
+        is_mock_engine = not is_node_1_active and not is_node_2_active
+
+        # --- DYNAMIC DEMO THROTTLE ---
         batch_size = 50 if is_mock_engine else 20
         pause_duration = 5 if is_mock_engine else 10
 
@@ -106,30 +117,50 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
         # 3. Mark as processing in DB
         supabase.table("email_queue").update({"status": "processing"}).eq("id", record["id"]).execute()
         
-        provider_used = "Sent"  # Default fallback UI label for the internal engine
+        provider_used = "Internal-Mock" 
         final_status = "delivered"
         
-        # 4. Engine Routing (Brevo vs Internal)
-        if not brevo_exhausted and brevo_sent_today < 300:
+        # 4. Engine Routing Cascade
+        if is_node_1_active:
             try:
-                res = await asyncio.to_thread(send_brevo_email_sync, record["email"], subject, html_content)
+                res = await asyncio.to_thread(send_brevo_email_sync, record["email"], subject, html_content, BREVO_API_KEY_1, SENDER_EMAIL_1)
                 if res.status_code in [200, 201]:
-                    provider_used = "Brevo"
+                    provider_used = "Brevo-Node-1"
                     brevo_sent_today += 1
                 elif res.status_code in [429, 402, 403]:
-                    print(f"[NETWORK] Brevo quota reached (Status: {res.status_code}). Switching to Internal Engine.")
-                    brevo_exhausted = True
+                    print(f"[NETWORK] Node 1 quota reached (Status: {res.status_code}). Failing over to Node 2.")
+                    node_1_exhausted = True
+                    brevo_sent_today = max(brevo_sent_today, 300) # Force switch to Tier 2
                 else:
-                    provider_used = "Brevo"
+                    provider_used = "Brevo-Node-1"
                     final_status = "bounced"
             except Exception as e:
-                print(f"[NETWORK ERROR] Failed to reach Brevo: {e}. Switching to Internal Engine.")
-                brevo_exhausted = True
+                print(f"[NETWORK ERROR] Node 1 failed: {e}. Failing over to Node 2.")
+                node_1_exhausted = True
+                brevo_sent_today = max(brevo_sent_today, 300)
+                
+        elif is_node_2_active:
+            try:
+                res = await asyncio.to_thread(send_brevo_email_sync, record["email"], subject, html_content, BREVO_API_KEY_2, SENDER_EMAIL_2)
+                if res.status_code in [200, 201]:
+                    provider_used = "Brevo-Node-2"
+                    brevo_sent_today += 1
+                elif res.status_code in [429, 402, 403]:
+                    print(f"[NETWORK] Node 2 quota reached (Status: {res.status_code}). Failing over to Internal Engine.")
+                    node_2_exhausted = True
+                    brevo_sent_today = max(brevo_sent_today, 600) # Force switch to Tier 3
+                else:
+                    provider_used = "Brevo-Node-2"
+                    final_status = "bounced"
+            except Exception as e:
+                print(f"[NETWORK ERROR] Node 2 failed: {e}. Failing over to Internal Engine.")
+                node_2_exhausted = True
+                brevo_sent_today = max(brevo_sent_today, 600)
         
-        if provider_used == "Sent":
-            # Internal Engine Simulation
-            await asyncio.sleep(0.01)  # Lightning fast micro-delay
-            if random.random() < 0.02:  # Realistic 2% bounce simulation
+        if provider_used == "Internal-Mock":
+            # Tier 3 Warp Speed Simulation
+            await asyncio.sleep(0.01)  
+            if random.random() < 0.02:  
                 final_status = "bounced"
             else:
                 final_status = "delivered"
@@ -335,7 +366,7 @@ async def get_dashboard_logs():
             formatted_logs.append({
                 "email": record["email"],
                 "status": (record["status"] or "").upper(),
-                "provider": record["provider_used"] or "Brevo",
+                "provider": record["provider_used"] or "Brevo-Node-1",
                 "time": time_obj.strftime("%H:%M:%S")
             })
         return {"logs": formatted_logs}
