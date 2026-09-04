@@ -117,48 +117,58 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
         # 3. Mark as processing in DB
         supabase.table("email_queue").update({"status": "processing"}).eq("id", record["id"]).execute()
         
-        provider_used = "Internal-Mock" 
-        final_status = "delivered"
+        email_dispatched = False
+        provider_used = "Pending"
+        final_status = "pending"
         
-        # 4. Engine Routing Cascade
-        if is_node_1_active:
+        # 4. Engine Routing Cascade (Instant Hot Potato Drop-Down)
+        if is_node_1_active and not email_dispatched:
             try:
                 res = await asyncio.to_thread(send_brevo_email_sync, record["email"], subject, html_content, BREVO_API_KEY_1, SENDER_EMAIL_1)
                 if res.status_code in [200, 201]:
                     provider_used = "Brevo-Node-1"
+                    final_status = "delivered"
                     brevo_sent_today += 1
+                    email_dispatched = True
                 elif res.status_code in [429, 402, 403]:
                     print(f"[NETWORK] Node 1 quota reached (Status: {res.status_code}). Failing over to Node 2.")
                     node_1_exhausted = True
-                    brevo_sent_today = max(brevo_sent_today, 300) # Force switch to Tier 2
+                    brevo_sent_today = max(brevo_sent_today, 300) 
+                    is_node_2_active = True # Immediately pass to Node 2
                 else:
                     provider_used = "Brevo-Node-1"
                     final_status = "bounced"
+                    email_dispatched = True
             except Exception as e:
                 print(f"[NETWORK ERROR] Node 1 failed: {e}. Failing over to Node 2.")
                 node_1_exhausted = True
                 brevo_sent_today = max(brevo_sent_today, 300)
+                is_node_2_active = True
                 
-        elif is_node_2_active:
+        if is_node_2_active and not email_dispatched:
             try:
                 res = await asyncio.to_thread(send_brevo_email_sync, record["email"], subject, html_content, BREVO_API_KEY_2, SENDER_EMAIL_2)
                 if res.status_code in [200, 201]:
                     provider_used = "Brevo-Node-2"
+                    final_status = "delivered"
                     brevo_sent_today += 1
+                    email_dispatched = True
                 elif res.status_code in [429, 402, 403]:
-                    print(f"[NETWORK] Node 2 quota reached (Status: {res.status_code}). Failing over to Internal Engine.")
+                    print(f"[NETWORK] Node 2 quota reached (Status: {res.status_code}). Failing over to Mock Engine.")
                     node_2_exhausted = True
-                    brevo_sent_today = max(brevo_sent_today, 600) # Force switch to Tier 3
+                    brevo_sent_today = max(brevo_sent_today, 600) 
                 else:
                     provider_used = "Brevo-Node-2"
                     final_status = "bounced"
+                    email_dispatched = True
             except Exception as e:
-                print(f"[NETWORK ERROR] Node 2 failed: {e}. Failing over to Internal Engine.")
+                print(f"[NETWORK ERROR] Node 2 failed: {e}. Failing over to Mock Engine.")
                 node_2_exhausted = True
                 brevo_sent_today = max(brevo_sent_today, 600)
         
-        if provider_used == "Internal-Mock":
+        if not email_dispatched:
             # Tier 3 Warp Speed Simulation
+            provider_used = "Internal-Mock"
             await asyncio.sleep(0.01)  
             if random.random() < 0.02:  
                 final_status = "bounced"
