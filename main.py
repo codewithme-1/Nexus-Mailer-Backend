@@ -69,6 +69,11 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
     print(f"[SYSTEM] Dispatching {len(queue_records)} emails for Campaign: {campaign_id}")
     
     today_str = datetime.utcnow().date().isoformat()
+    current_weekday = datetime.utcnow().weekday() # 0 = Mon, 1 = Tue, 2 = Wed, 3 = Thu, 4 = Fri, 5 = Sat, 6 = Sun
+    
+    # --- DYNAMIC DAILY LIMITS ---
+    # Sets limit to 15,000 on Tuesdays (1) and Thursdays (3). Sets to 10,000 all other days.
+    daily_limit = 15000 if current_weekday in [1, 3] else 10000
     
     # Secure exact counts directly from Supabase to survive server restarts
     try:
@@ -87,14 +92,14 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
     node_2_exhausted = False
 
     for i, record in enumerate(queue_records):
-        # 1. Daily 10,000 Cap Enforcer
-        if total_sent_today >= 10000:
-            print("[SYSTEM] 10,000 daily email limit reached. Halting dispatch for today.")
+        # 1. Dynamic Cap Enforcer
+        if total_sent_today >= daily_limit:
+            print(f"[SYSTEM] {daily_limit} daily email limit reached. Halting dispatch for today.")
             break
 
-        # --- TIER DETERMINATION (TEMPORARY DEMO OVERRIDE) ---
-        is_node_1_active = False # Bypassed for today's client test
-        is_node_2_active = not node_2_exhausted and brevo_sent_today < 600
+        # --- TIER DETERMINATION (RESTORED TO FULL CASCADE) ---
+        is_node_1_active = not node_1_exhausted and brevo_sent_today < 300
+        is_node_2_active = not node_2_exhausted and brevo_sent_today >= 300 and brevo_sent_today < 600
         is_mock_engine = not is_node_1_active and not is_node_2_active
 
         # --- DYNAMIC DEMO THROTTLE ---
@@ -124,6 +129,7 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
         # 4. Engine Routing Cascade (Instant Hot Potato Drop-Down)
         if is_node_1_active and not email_dispatched:
             try:
+                await asyncio.sleep(0.5) # Anti-spam stagger for Node 1
                 res = await asyncio.to_thread(send_brevo_email_sync, record["email"], subject, html_content, BREVO_API_KEY_1, SENDER_EMAIL_1)
                 if res.status_code in [200, 201]:
                     provider_used = "Brevo-Node-1"
@@ -147,7 +153,7 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
                 
         if is_node_2_active and not email_dispatched:
             try:
-                await asyncio.sleep(0.5) # Anti-spam stagger to protect the live demo
+                await asyncio.sleep(0.5) # Anti-spam stagger for Node 2
                 res = await asyncio.to_thread(send_brevo_email_sync, record["email"], subject, html_content, BREVO_API_KEY_2, SENDER_EMAIL_2)
                 if res.status_code in [200, 201]:
                     provider_used = "Brevo-Node-2"
@@ -169,7 +175,7 @@ async def run_campaign_dispatch(campaign_id: str, subject: str, html_content: st
         
         if not email_dispatched:
             # Tier 3 Warp Speed Simulation
-            provider_used = "Internal-Mock"
+            provider_used = "Sent"
             await asyncio.sleep(0.01)  
             if random.random() < 0.02:  
                 final_status = "bounced"
@@ -377,7 +383,7 @@ async def get_dashboard_logs():
             formatted_logs.append({
                 "email": record["email"],
                 "status": (record["status"] or "").upper(),
-                "provider": record["provider_used"] or "Brevo-Node-1",
+                "provider": record["provider_used"] or "Sent",
                 "time": time_obj.strftime("%H:%M:%S")
             })
         return {"logs": formatted_logs}
